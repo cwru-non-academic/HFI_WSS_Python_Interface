@@ -1,17 +1,13 @@
-#!/usr/bin/env python3
+from pythonnet import load
+load("coreclr")
 import clr
 import configs.Loc as Loc
 clr.AddReference(Loc.dllPath)
+import Wss.CoreModule as WSScore # type: ignore
 
-# from clr import WSSBaseCode
-# from WSSBaseCode import SerialPortTransport
-import logging
-logger = logging.getLogger(__name__)
-print("step 1 complete")
-logging.basicConfig(filename='myapp.log', level=logging.INFO)
-print("step 2 complete")
-logger.info('statement 1')
-#print(WSSBaseCode.GoFirst.bang)
-print("step 3 complete")
-logger.info("statement 2")
-print("step 4 complete")
+import LogSink
+import Logger
+
+test = Logger.logFile()
+LogSink.Log("Error", "message", test)
+print("looks okay so far...")
