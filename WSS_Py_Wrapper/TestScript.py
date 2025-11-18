@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 import clr
-#I'll make a config later but for now set the below path to match where YOUR WSS_Core_Interface.dll file is ;)
-clr.AddReference(r'C:\Users\shs120\HFI_WSS_Python_Interface\Cs_Libraries\WSS_Core_Interface.dll')
+import configs.Loc as Loc
+clr.AddReference(Loc.dllPath)
+
+# from clr import WSSBaseCode
+# from WSSBaseCode import SerialPortTransport
+import logging
+logger = logging.getLogger(__name__)
 print("step 1 complete")
-from clr import WSSBaseCode
-#from WSSBaseCode import GoFirst
+logging.basicConfig(filename='myapp.log', level=logging.INFO)
 print("step 2 complete")
-print(WSSBaseCode.GoFirst.bang)
-print("step3 complete")
+logger.info('statement 1')
+#print(WSSBaseCode.GoFirst.bang)
+print("step 3 complete")
+logger.info("statement 2")
+print("step 4 complete")
