@@ -1,0 +1,4 @@
+begin log_202601051627 at 16:27:10
+16:27:10	INFO:  Connecting to WSS Unit...
+16:27:13	INFO:  Test mode engaged.
+16:27:13	INFO:  Begin initializing WSS unit
