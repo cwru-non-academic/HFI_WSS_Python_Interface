@@ -1,0 +1,444 @@
+from __future__ import annotations
+
+from pathlib import Path
+import threading
+import time
+
+from .config import WssConfig
+from .log_sink import FileLogSink, install_csharp_log_sink
+from .wss_loader import WssLoader, collect_dlls
+
+
+def _resolve_log_type():
+    try:
+        from WSS_Core_Interface import Log as WssLog  # type: ignore
+
+        return WssLog
+    except Exception:
+        pass
+
+    try:
+        import Log as LogModule  # type: ignore
+
+        if hasattr(LogModule, "Log"):
+            return LogModule.Log
+        return LogModule
+    except Exception:
+        pass
+
+    raise RuntimeError("Unable to locate C# Log type in WSS_Core_Interface.dll.")
+
+
+class StimulationController:
+    def __init__(self, config: WssConfig) -> None:
+        self._config = config
+        self._gate = threading.Lock()
+        self._wss = None
+        self._basic_wss = None
+        self._basic_supported = False
+        self._tick_thread: threading.Thread | None = None
+        self._tick_stop = threading.Event()
+        self._log_reset = None
+        self._log_type = None
+        self._net_types = None
+        self.started = False
+
+    @property
+    def BasicSupported(self) -> bool:
+        return self._basic_supported
+
+    def Initialize(self) -> None:
+        with self._gate:
+            if self._wss is not None:
+                return
+
+            self._load_dotnet()
+            self._install_log_sink()
+
+            core = self._create_core()
+            params_layer = self._net_types["StimParamsLayer"](core, str(self._config.config_path))
+            model_layer = self._net_types["ModelParamsLayer"](params_layer, str(self._config.config_path))
+
+            self._wss = model_layer
+            self._basic_supported, self._basic_wss = self._try_get_basic(self._wss)
+
+            self._wss.Initialize()
+            self._ensure_tick_loop()
+
+    def Shutdown(self) -> None:
+        with self._gate:
+            self._stop_tick_loop()
+            if self._wss is not None:
+                try:
+                    self._wss.Shutdown()
+                except Exception as ex:
+                    self._log_error(f"Error during Shutdown: {ex}")
+                try:
+                    self._wss.Dispose()
+                except Exception as ex:
+                    self._log_error(f"Error disposing stimulation core: {ex}")
+
+            if self._log_reset is not None:
+                try:
+                    self._log_reset()
+                except Exception:
+                    pass
+
+            self._wss = None
+            self._basic_wss = None
+            self._basic_supported = False
+            self.started = False
+
+    def releaseRadio(self) -> None:
+        self.Shutdown()
+
+    def resetRadio(self) -> None:
+        with self._gate:
+            if self._wss is None:
+                return
+            self._stop_tick_loop()
+            self._wss.Shutdown()
+            self._wss.Initialize()
+            self._ensure_tick_loop()
+
+    def _ensure_tick_loop(self) -> None:
+        if self._wss is None:
+            return
+        if self._tick_thread is not None and self._tick_thread.is_alive():
+            return
+
+        self._stop_tick_loop()
+        self._tick_stop.clear()
+
+        interval = max(1, int(self._config.tick_interval_ms))
+
+        def loop() -> None:
+            while not self._tick_stop.is_set():
+                try:
+                    if self._wss is not None:
+                        self._wss.Tick()
+                except Exception as ex:
+                    self._log_error(f"Tick loop failure: {ex}")
+                time.sleep(interval / 1000.0)
+
+        self._tick_thread = threading.Thread(target=loop, name="wss-tick", daemon=True)
+        self._tick_thread.start()
+
+    def _stop_tick_loop(self) -> None:
+        if self._tick_thread is None:
+            return
+        self._tick_stop.set()
+        self._tick_thread.join(timeout=2)
+        self._tick_thread = None
+
+    def StimulateAnalog(self, finger: str, PW: int, amp: int = 3, IPI: int = 10) -> None:
+        wss = self._ensure_wss()
+        channel = self._finger_to_channel(finger)
+        wss.StimulateAnalog(channel, PW, amp, IPI)
+
+    def StartStimulation(self) -> None:
+        wss = self._ensure_wss()
+        wss.StartStim(self._net_types["WssTarget"].Broadcast)
+        self.started = True
+
+    def StopStimulation(self) -> None:
+        wss = self._ensure_wss()
+        wss.StopStim(self._net_types["WssTarget"].Broadcast)
+        self.started = False
+
+    def Save(self, targetWSS: int | None = None) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        target = self._int_to_wss_target(targetWSS)
+        basic.Save(target)
+
+    def load(self, targetWSS: int | None = None) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        target = self._int_to_wss_target(targetWSS)
+        basic.Load(target)
+
+    def request_Configs(self, targetWSS: int, command: int, id: int) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        basic.Request_Configs(command, id, self._int_to_wss_target(targetWSS))
+
+    def updateWaveform(self, *args) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+
+        if len(args) == 2 and isinstance(args[0], self._net_types["WaveformBuilder"]):
+            waveform, event_id = args
+            basic.UpdateWaveform(waveform, event_id, self._net_types["WssTarget"].Broadcast)
+            return
+
+        if len(args) == 3 and isinstance(args[0], int) and isinstance(args[1], self._net_types["WaveformBuilder"]):
+            target, waveform, event_id = args
+            basic.UpdateWaveform(waveform, event_id, self._int_to_wss_target(target))
+            return
+
+        if len(args) == 2 and isinstance(args[0], (list, tuple)):
+            waveform, event_id = args
+            basic.UpdateWaveform(waveform, event_id, self._net_types["WssTarget"].Broadcast)
+            return
+
+        if len(args) == 3 and isinstance(args[0], int) and isinstance(args[1], (list, tuple)):
+            target, waveform, event_id = args
+            basic.UpdateWaveform(waveform, event_id, self._int_to_wss_target(target))
+            return
+
+        if len(args) == 3 and all(isinstance(a, int) for a in args):
+            cathodic, anodic, event_id = args
+            basic.UpdateEventShape(cathodic, anodic, event_id, self._net_types["WssTarget"].Broadcast)
+            return
+
+        if len(args) == 4 and all(isinstance(a, int) for a in args):
+            target, cathodic, anodic, event_id = args
+            basic.UpdateEventShape(cathodic, anodic, event_id, self._int_to_wss_target(target))
+            return
+
+        raise ValueError("Unsupported updateWaveform signature.")
+
+    def loadWaveform(self, fileName: str, eventID: int) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        basic.LoadWaveform(fileName, eventID)
+
+    def WaveformSetup(self, wave, eventID: int, targetWSS: int | None = None) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        target = self._int_to_wss_target(targetWSS)
+        basic.WaveformSetup(wave, eventID, target)
+
+    def UpdateIPD(self, ipd: int, eventID: int, targetWSS: int | None = None) -> None:
+        basic = self._require_basic()
+        if basic is None:
+            return
+        target = self._int_to_wss_target(targetWSS)
+        basic.UpdateIPD(ipd, eventID, target)
+
+    def StimulateNormalized(self, finger: str, magnitude: float) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.StimulateNormalized(ch, magnitude)
+
+    def GetStimIntensity(self, finger: str) -> int:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return int(wss.GetStimIntensity(ch))
+
+    def SaveParamsJson(self) -> None:
+        self._ensure_wss().SaveParamsJson()
+
+    def LoadParamsJson(self, pathOrDir: str | None = None) -> None:
+        wss = self._ensure_wss()
+        if pathOrDir is None:
+            wss.LoadParamsJson()
+        else:
+            wss.LoadParamsJson(pathOrDir)
+
+    def AddOrUpdateStimParam(self, key: str, value: float) -> None:
+        self._ensure_wss().AddOrUpdateStimParam(key, value)
+
+    def GetStimParam(self, key: str) -> float:
+        return self._ensure_wss().GetStimParam(key)
+
+    def TryGetStimParam(self, key: str):
+        return self._ensure_wss().TryGetStimParam(key)
+
+    def GetAllStimParams(self):
+        return self._ensure_wss().GetAllStimParams()
+
+    def SetChannelAmp(self, finger: str, mA: float) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.SetChannelAmp(ch, mA)
+
+    def SetChannelPWMin(self, finger: str, us: int) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.SetChannelPWMin(ch, us)
+
+    def SetChannelPWMax(self, finger: str, us: int) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.SetChannelPWMax(ch, us)
+
+    def SetChannelIPI(self, finger: str, ms: int) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.SetChannelIPI(ch, ms)
+
+    def GetChannelAmp(self, finger: str) -> float:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return wss.GetChannelAmp(ch)
+
+    def GetChannelPWMin(self, finger: str) -> int:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return wss.GetChannelPWMin(ch)
+
+    def GetChannelPWMax(self, finger: str) -> int:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return wss.GetChannelPWMax(ch)
+
+    def GetChannelIPI(self, finger: str) -> int:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return wss.GetChannelIPI(ch)
+
+    def IsFingerValid(self, finger: str) -> bool:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        return wss.IsChannelInRange(ch)
+
+    def StimWithMode(self, finger: str, magnitude: float) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        wss.StimWithMode(ch, magnitude)
+
+    def UpdateChannelParams(self, finger: str, max_val: int, min_val: int, amp: int) -> None:
+        wss = self._ensure_wss()
+        ch = self._finger_to_channel(finger)
+        if not wss.IsChannelInRange(ch):
+            raise ValueError(f"Channel {ch} is not valid for current config.")
+
+        base_key = f"stim.ch.{ch}"
+        wss.AddOrUpdateStimParam(f"{base_key}.maxPW", max_val)
+        wss.AddOrUpdateStimParam(f"{base_key}.minPW", min_val)
+        wss.AddOrUpdateStimParam(f"{base_key}.amp", amp)
+
+    def isModeValid(self) -> bool:
+        return self._ensure_wss().IsModeValid()
+
+    def Ready(self) -> bool:
+        return self._wss.Ready() if self._wss is not None else False
+
+    def Started(self) -> bool:
+        return self._wss.Started() if self._wss is not None else False
+
+    def GetModelConfigCTRL(self):
+        return self._ensure_wss().GetModelConfigController()
+
+    def GetCoreConfigCTRL(self):
+        return self._ensure_wss().GetCoreConfigController()
+
+    def LoadCoreConfigFile(self) -> None:
+        self._ensure_wss().LoadConfigFile()
+
+    def _load_dotnet(self) -> None:
+        dlls = collect_dlls(self._config.cs_lib_dir)
+        if not dlls:
+            raise FileNotFoundError(f"No DLLs found in {self._config.cs_lib_dir}")
+
+        loader = WssLoader(dlls)
+        loader.load()
+
+        from WSS_Core_Interface import (  # type: ignore
+            CoreConfigController,
+            ModelConfigController,
+            ModelParamsLayer,
+            StimParamsLayer,
+            WaveformBuilder,
+            WssStimulationCore,
+            WssTarget,
+        )
+
+        self._net_types = {
+            "CoreConfigController": CoreConfigController,
+            "ModelConfigController": ModelConfigController,
+            "ModelParamsLayer": ModelParamsLayer,
+            "StimParamsLayer": StimParamsLayer,
+            "WaveformBuilder": WaveformBuilder,
+            "WssStimulationCore": WssStimulationCore,
+            "WssTarget": WssTarget,
+        }
+
+    def _create_core(self):
+        core_class = self._net_types["WssStimulationCore"]
+        config_path = str(self._config.config_path)
+        if self._config.serial_port:
+            return core_class(self._config.serial_port, config_path, self._config.test_mode, self._config.max_setup_tries)
+        return core_class(config_path, self._config.test_mode, self._config.max_setup_tries)
+
+    def _install_log_sink(self) -> None:
+        if self._log_reset is not None:
+            return
+        self._log_type = _resolve_log_type()
+        sink = FileLogSink(self._config.log_path)
+        self._log_reset = install_csharp_log_sink(self._log_type, sink)
+
+    def _log_error(self, message: str) -> None:
+        if self._log_type is None:
+            return
+        try:
+            self._log_type.Error(message)
+        except Exception:
+            pass
+
+    def _ensure_wss(self):
+        if self._wss is None:
+            raise RuntimeError("Call Initialize() before using the stimulation controller.")
+        return self._wss
+
+    def _try_get_basic(self, wss):
+        try:
+            result = wss.TryGetBasic()
+        except Exception:
+            return False, None
+
+        if isinstance(result, tuple):
+            success, basic = result
+            return bool(success), basic
+
+        return bool(result), None
+
+    def _require_basic(self):
+        if not self._basic_supported or self._basic_wss is None:
+            self._log_error("Basic stimulation not supported.")
+            return None
+        return self._basic_wss
+
+    def _int_to_wss_target(self, value: int | None):
+        target = self._net_types["WssTarget"].Broadcast
+        if value is None:
+            return target
+        if value == 1:
+            return self._net_types["WssTarget"].Wss1
+        if value == 2:
+            return self._net_types["WssTarget"].Wss2
+        if value == 3:
+            return self._net_types["WssTarget"].Wss3
+        return target
+
+    @staticmethod
+    def _finger_to_channel(finger_or_alias: str) -> int:
+        if not finger_or_alias:
+            return 0
+
+        if finger_or_alias.lower().startswith("ch"):
+            try:
+                return int(finger_or_alias[2:])
+            except ValueError:
+                return 0
+
+        match = finger_or_alias.lower()
+        if match == "thumb":
+            return 1
+        if match == "index":
+            return 2
+        if match == "middle":
+            return 3
+        if match == "ring":
+            return 4
+        if match in ("pinky", "little"):
+            return 5
+        return 0
