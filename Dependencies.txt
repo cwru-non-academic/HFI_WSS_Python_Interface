@@ -1,5 +1,0 @@
-python  greater than or equal to 3.10 but no higher than 3.13
-pySerial
-	(python -m pip install pyserial)
-pythonnet 
-	(reccommend building from https://github.com/pythonnet/pythonnet)

@@ -18,6 +18,13 @@ def _resolve_log_type():
         pass
 
     try:
+        from Wss.CoreModule import Log as WssLog  # type: ignore
+
+        return WssLog
+    except Exception:
+        pass
+
+    try:
         import Log as LogModule  # type: ignore
 
         if hasattr(LogModule, "Log"):
@@ -342,15 +349,25 @@ class StimulationController:
         loader = WssLoader(dlls)
         loader.load()
 
-        from WSS_Core_Interface import (  # type: ignore
-            CoreConfigController,
-            ModelConfigController,
-            ModelParamsLayer,
-            StimParamsLayer,
-            WaveformBuilder,
-            WssStimulationCore,
-            WssTarget,
-        )
+        try:
+            from WSS_Core_Interface import (  # type: ignore
+                CoreConfigController,
+                ModelConfigController,
+                ModelParamsLayer,
+                StimParamsLayer,
+                WaveformBuilder,
+                WssStimulationCore,
+                WssTarget,
+            )
+        except Exception:
+            from Wss.CoreModule import (  # type: ignore
+                CoreConfigController,
+                WaveformBuilder,
+                WssStimulationCore,
+                WssTarget,
+            )
+            from Wss.ModelModule import ModelConfigController, ModelParamsLayer  # type: ignore
+            from Wss.CalibrationModule import StimParamsLayer  # type: ignore
 
         self._net_types = {
             "CoreConfigController": CoreConfigController,
