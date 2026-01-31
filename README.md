@@ -3,7 +3,7 @@
 
 Python wrapper for the HFI_WSS_Interface library.
 
-## Quick start (Linux)
+## Quick start
 
 1) Ensure the C# DLLs are present:
 
@@ -13,14 +13,11 @@ Python wrapper for the HFI_WSS_Interface library.
 
 You can find them in HFI_WSS_Interface: https://github.com/cwru-non-academic/WSSCoreInterface/releases
 
-2) Install venv + Mono, create the environment, and install the package:
+2) Create a venv and install the package:
 
 ```
-sudo apt update
-sudo apt install python3.10-venv mono-complete
-
 cd .../WSS_Python_Wrapper/WSS_Py_Wrapper
-python3.10 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e .
@@ -31,6 +28,52 @@ python -m pip install -e .
 ```
 python -m wss_py_wrapper.cli --help
 python -m wss_py_wrapper.cli --test
+```
+
+## OS-specific setup
+
+### Linux
+
+Install prerequisites (venv + Mono):
+
+```
+sudo apt update
+sudo apt install python3.10-venv mono-complete
+```
+
+Serial permissions:
+
+The device node is usually owned by the `dialout` group (example: `/dev/ttyACM0`).
+Add your user to the group, then log out/in:
+
+```
+sudo usermod -aG dialout $USER
+```
+
+To see which group owns the device on your system:
+
+```
+ls -l /dev/ttyACM* /dev/ttyUSB*
+```
+
+Add yourself to the listed group if it is not `dialout`.
+
+### Windows
+
+Install Python 3.9+ and the .NET runtime, then use the Windows venv activation:
+
+```
+cd .../WSS_Python_Wrapper/WSS_Py_Wrapper
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+Run the CLI:
+
+```
+python -m wss_py_wrapper.cli --help
 ```
 
 ## Quick start (no install)
@@ -45,12 +88,19 @@ python -m pip install -e WSS_Py_Wrapper
 PYTHONPATH=./WSS_Py_Wrapper/src python -m wss_py_wrapper.cli --test
 ```
 
+## Run every time
+
+```
+source WSS_Py_Wrapper/.venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
+PYTHONPATH=./WSS_Py_Wrapper/src python -m wss_py_wrapper.cli
+```
+
 ## CLI usage
 
 Run:
 
 ```
-python -m wss_py_wrapper.cli -- [options]
+python -m wss_py_wrapper.cli [options]
 ```
 
 Options:
@@ -84,13 +134,3 @@ Default log file location:
 Change log file location:
 - Edit `WSS_Py_Wrapper/src/wss_py_wrapper/config.py` and update `WssConfig.default()` to set a different `log_path`.
 - Or construct `WssConfig` yourself and pass it to `StimulationController` in your own script.
-
-## Development
-
-Create a virtual environment, then install dependencies:
-
-```bash
-python -m venv .venv
-./.venv/Scripts/Activate.ps1
-python -m pip install -e .
-```
