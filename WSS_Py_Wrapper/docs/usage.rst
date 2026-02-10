@@ -19,6 +19,25 @@ Install (dev)
    python -m pip install -U pip
    python -m pip install -e .
 
+Documentation (Sphinx)
+----------------------
+
+If you want to generate project documentation, install the optional ``docs`` extra
+(this installs Sphinx):
+
+.. code-block:: bash
+
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -U pip
+   python -m pip install -e ".[docs]"
+
+Then build the HTML docs:
+
+.. code-block:: bash
+
+   sphinx-build -b html docs docs/_build/html
+
 CLI
 ---
 
