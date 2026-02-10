@@ -1,3 +1,8 @@
+"""Interactive console for driving the stimulation controller.
+
+Run via ``python -m wss_py_wrapper.cli -- [options]``.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -114,6 +119,11 @@ def _run_interactive_loop(controller: StimulationController) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the interactive CLI.
+
+    :param argv: Optional argument list. If omitted, uses ``sys.argv[1:]``.
+    :returns: Process exit code.
+    """
     argv = list(argv) if argv is not None else sys.argv[1:]
     if "/?" in argv:
         _print_cli_usage()

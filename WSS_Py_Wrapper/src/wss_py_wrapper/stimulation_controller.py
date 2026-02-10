@@ -1,3 +1,9 @@
+"""High-level controller wrapping the .NET stimulation stack.
+
+This module contains the interop-heavy runtime core. The main entry point is
+:class:`~wss_py_wrapper.stimulation_controller.StimulationController`.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,6 +16,13 @@ from .wss_loader import WssLoader, collect_dlls
 
 
 def _resolve_log_type():
+    """Resolve the .NET ``Log`` type from supported namespaces.
+
+    The wrapper supports multiple namespace layouts depending on the DLL set.
+
+    :returns: A .NET type exposing ``SetSink``/``ResetSink`` and level methods.
+    :raises RuntimeError: If no compatible Log type can be located.
+    """
     try:
         from WSS_Core_Interface import Log as WssLog  # type: ignore
 
@@ -37,6 +50,19 @@ def _resolve_log_type():
 
 
 class StimulationController:
+    """Python wrapper around the WSS .NET stimulation controller layers.
+
+    Lifecycle:
+    - Call :meth:`Initialize` before using any stimulation methods.
+    - Call :meth:`Shutdown` to stop the background tick thread and dispose .NET objects.
+
+    Threading:
+    - A background tick loop calls ``Tick()`` at ``config.tick_interval_ms``.
+    - Methods are guarded by an internal lock at key lifecycle transitions.
+
+    :param config: Wrapper configuration.
+    """
+
     def __init__(self, config: WssConfig) -> None:
         self._config = config
         self._gate = threading.Lock()
@@ -52,9 +78,18 @@ class StimulationController:
 
     @property
     def BasicSupported(self) -> bool:
+        """Whether the optional "Basic" .NET API is available."""
         return self._basic_supported
 
     def Initialize(self) -> None:
+        """Load .NET DLLs, initialize layers, and start the tick loop.
+
+        This method is safe to call multiple times; subsequent calls are no-ops
+        once initialized.
+
+        :raises FileNotFoundError: If required DLLs cannot be found.
+        :raises RuntimeError: If required .NET types cannot be imported.
+        """
         with self._gate:
             if self._wss is not None:
                 return
@@ -73,6 +108,11 @@ class StimulationController:
             self._ensure_tick_loop()
 
     def Shutdown(self) -> None:
+        """Stop stimulation, stop the tick loop, and dispose .NET objects.
+
+        Exceptions during shutdown are logged (when possible) but do not prevent
+        the remainder of cleanup.
+        """
         with self._gate:
             self._stop_tick_loop()
             if self._wss is not None:
@@ -97,9 +137,15 @@ class StimulationController:
             self.started = False
 
     def releaseRadio(self) -> None:
+        """Backward-compatible alias for :meth:`Shutdown`."""
         self.Shutdown()
 
     def resetRadio(self) -> None:
+        """Restart the .NET core without reloading DLLs.
+
+        This shuts down and re-initializes the underlying .NET object and
+        restarts the tick loop.
+        """
         with self._gate:
             if self._wss is None:
                 return
@@ -139,16 +185,32 @@ class StimulationController:
         self._tick_thread = None
 
     def StimulateAnalog(self, finger: str, PW: int, amp: int = 3, IPI: int = 10) -> None:
+        """Send a direct analog stimulation request.
+
+        :param finger: Finger name (e.g. ``"index"``) or channel alias (e.g. ``"ch2"``).
+        :param PW: Pulse width (units defined by the .NET interface).
+        :param amp: Amplitude (units defined by the .NET interface).
+        :param IPI: Inter-pulse interval (units defined by the .NET interface).
+        :raises RuntimeError: If called before :meth:`Initialize`.
+        """
         wss = self._ensure_wss()
         channel = self._finger_to_channel(finger)
         wss.StimulateAnalog(channel, PW, amp, IPI)
 
     def StartStimulation(self) -> None:
+        """Broadcast a start stimulation command.
+
+        :raises RuntimeError: If called before :meth:`Initialize`.
+        """
         wss = self._ensure_wss()
         wss.StartStim(self._net_types["WssTarget"].Broadcast)
         self.started = True
 
     def StopStimulation(self) -> None:
+        """Broadcast a stop stimulation command.
+
+        :raises RuntimeError: If called before :meth:`Initialize`.
+        """
         wss = self._ensure_wss()
         wss.StopStim(self._net_types["WssTarget"].Broadcast)
         self.started = False
@@ -231,6 +293,12 @@ class StimulationController:
         basic.UpdateIPD(ipd, eventID, target)
 
     def StimulateNormalized(self, finger: str, magnitude: float) -> None:
+        """Stimulate a channel with a normalized magnitude.
+
+        :param finger: Finger name (e.g. ``"thumb"``) or channel alias (e.g. ``"ch1"``).
+        :param magnitude: Normalized magnitude as defined by the .NET interface.
+        :raises RuntimeError: If called before :meth:`Initialize`.
+        """
         wss = self._ensure_wss()
         ch = self._finger_to_channel(finger)
         wss.StimulateNormalized(ch, magnitude)
@@ -241,9 +309,14 @@ class StimulationController:
         return int(wss.GetStimIntensity(ch))
 
     def SaveParamsJson(self) -> None:
+        """Persist stimulation parameters JSON via the .NET layer."""
         self._ensure_wss().SaveParamsJson()
 
     def LoadParamsJson(self, pathOrDir: str | None = None) -> None:
+        """Load stimulation parameters JSON via the .NET layer.
+
+        :param pathOrDir: Optional file/directory path interpreted by the .NET layer.
+        """
         wss = self._ensure_wss()
         if pathOrDir is None:
             wss.LoadParamsJson()
@@ -308,11 +381,26 @@ class StimulationController:
         return wss.IsChannelInRange(ch)
 
     def StimWithMode(self, finger: str, magnitude: float) -> None:
+        """Stimulate using the active mode/model parameters.
+
+        :param finger: Finger name (e.g. ``"index"``) or channel alias (e.g. ``"ch2"``).
+        :param magnitude: Normalized magnitude.
+        """
         wss = self._ensure_wss()
         ch = self._finger_to_channel(finger)
         wss.StimWithMode(ch, magnitude)
 
     def UpdateChannelParams(self, finger: str, max_val: int, min_val: int, amp: int) -> None:
+        """Update per-channel stimulation parameters.
+
+        This writes values under keys like ``stim.ch.<ch>.maxPW``.
+
+        :param finger: Finger name or channel alias.
+        :param max_val: Maximum pulse width.
+        :param min_val: Minimum pulse width.
+        :param amp: Channel amplitude.
+        :raises ValueError: If the channel is invalid for the current configuration.
+        """
         wss = self._ensure_wss()
         ch = self._finger_to_channel(finger)
         if not wss.IsChannelInRange(ch):
@@ -339,6 +427,7 @@ class StimulationController:
         return self._ensure_wss().GetCoreConfigController()
 
     def LoadCoreConfigFile(self) -> None:
+        """Reload the core configuration file via the .NET layer."""
         self._ensure_wss().LoadConfigFile()
 
     def _load_dotnet(self) -> None:

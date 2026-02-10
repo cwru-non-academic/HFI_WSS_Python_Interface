@@ -1,3 +1,9 @@
+"""Logging helpers.
+
+This module provides a minimal sink interface and a file sink. It also includes a
+bridge to bind a Python sink to the .NET ``Log.SetSink(...)`` API.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,11 +13,23 @@ from typing import Callable
 
 
 class LogSink:
+    """Abstract sink used by :class:`~wss_py_wrapper.logger.Logger` and the C# bridge."""
+
     def write(self, level: str, message: str) -> None:
+        """Write a log message.
+
+        :param level: Log level text (e.g. ``INFO``).
+        :param message: Log message.
+        """
         raise NotImplementedError("Provide a sink implementation.")
 
 
 class FileLogSink(LogSink):
+    """Thread-safe file sink.
+
+    :param path: File path to append logs to.
+    """
+
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
@@ -30,9 +48,11 @@ class FileLogSink(LogSink):
 
 
 def install_csharp_log_sink(log_type, sink: LogSink) -> Callable[[], None]:
-    """
-    Bind a Python sink to the C# Log.SetSink(Action<LogLevel,string>) API.
-    Returns a reset callback to restore the default C# sink.
+    """Bind a Python sink to the C# ``Log.SetSink(Action<LogLevel,string>)`` API.
+
+    :param log_type: Resolved .NET ``Log`` type providing ``SetSink``/``ResetSink``.
+    :param sink: Python sink implementation.
+    :returns: A callback that resets the sink back to the default C# sink.
     """
     from System import Action  # type: ignore
 
