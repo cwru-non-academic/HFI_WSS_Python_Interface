@@ -3,6 +3,8 @@
 
 Python wrapper for the HFI_WSS_Interface library.
 
+All documentation about the API and other implementations can be found in [GitHub Pages](https://cwru-non-academic.github.io/WSS_Documentation/).
+
 ## Quick start
 
 1) Ensure the C# DLLs are present:
